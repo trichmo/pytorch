@@ -210,6 +210,26 @@ class SyntheticLocalSource(Source):
 
 
 @dataclass_with_cached_hash(frozen=True)
+class HoistedValueSource(Source):
+    hoisted_call_index: int
+
+    @property
+    def guard_source(self) -> GuardSource:
+        return GuardSource.RANDOM_VALUE
+
+    def reconstruct(self, codegen: "PyCodegen") -> None:
+        codegen.append_output(codegen.create_load(
+                              codegen.tx.output.hoisted_values_var))
+        codegen.append_output(codegen.create_load_const(
+                              self.hoisted_call_index))
+        codegen.append_output(create_binary_subscr())
+
+    @functools.cached_property
+    def _name_template(self) -> str:
+        return f"hoisted_value_{_esc_str(self.hoisted_call_index)}"
+
+
+@dataclass_with_cached_hash(frozen=True)
 class RandomValueSource(Source):
     random_call_index: int
 

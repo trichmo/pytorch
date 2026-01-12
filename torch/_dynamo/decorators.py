@@ -172,6 +172,18 @@ def assume_constant_result(fn):  # type: ignore[no-untyped-def]
     return fn
 
 
+def hoist_to_prelude(fn):
+    """
+    Docstring for hoist_to_prelude
+    
+    :param fn: Description
+    :return: Description
+    :rtype: NoReturn
+    """
+    fn._dynamo_hoist_to_prelude = True
+    return fn
+
+
 def allow_in_graph(fn):  # type: ignore[no-untyped-def]
     """
     Tells the compiler frontend (Dynamo) to skip symbolic introspection of the function

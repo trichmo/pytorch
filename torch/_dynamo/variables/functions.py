@@ -65,6 +65,7 @@ from ..source import (
     ConstantSource,
     DefaultsSource,
     GetItemSource,
+    HoistedValueSource,
     SkipGuardSource,
     TorchSource,
     TypeSource,
@@ -422,6 +423,34 @@ class BaseUserFunctionVariable(VariableTracker):
         return True
 
 
+def call_hoisted_fn(tx: "InstructionTranslator",
+                    fn: Callable[..., Any],
+                    args: Sequence[VariableTracker],
+                    kwargs: dict[str, VariableTracker],
+                    ) -> VariableTracker:
+    from .builder import VariableBuilder
+    from torch._guards import TracingContext
+
+    def get_hoistable_arg(arg):
+        if isinstance(arg, variables.SymNodeVariable):
+            return arg.evaluate_expr()
+        return arg.as_python_constant()
+
+    args = [get_hoistable_arg(x) for x in args]
+    kwargs = {k: get_hoistable_arg(v) for k, v in kwargs.items()}
+    hoisted_call_index = len(tx.output.hoisted_calls)
+    example_value = fn(*args, **kwargs)
+    source = HoistedValueSource(hoisted_call_index)
+    tx.output.hoisted_calls.append((fn, args, kwargs))
+    # TODO: arguably, this should route to wrap_symint/wrap_symfloat
+    # (currently hypothetical), but I'm not going to poke my hand in
+    # this nest for now
+    result = VariableBuilder(tx, source)(example_value)
+    result = result.realize()
+    TracingContext.get().guards_context.dynamo_guards.remove_guards_with_source(source)
+    return result
+
+
 class UserFunctionVariable(BaseUserFunctionVariable):
     """Some unsupported user-defined global function"""
 
@@ -646,6 +675,9 @@ class UserFunctionVariable(BaseUserFunctionVariable):
             # pyrefly: ignore[missing-attribute]
             fn = fn_var.fn
             return variables.TorchInGraphFunctionVariable(fn, nonstrict_traceable=True)
+        elif getattr(self.fn, "_dynamo_hoist_to_prelude", False):
+            #tx.output.hoisted_calls.append((self.fn, args, kwargs))
+            return call_hoisted_fn(tx, self.fn, args, kwargs)
 
         if self.is_constant:
             return invoke_and_store_as_constant(

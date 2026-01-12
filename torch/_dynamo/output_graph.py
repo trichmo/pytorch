@@ -257,6 +257,12 @@ def _get_gen_rand_values_fn(random_calls: Any) -> Callable[[], list[Any]]:
 
     return _gen_rand_values
 
+def _get_gen_hoisted_values_fn(hoisted_calls: Any) -> Callable[[], list[Any]]:
+    def _gen_hoisted_values() -> list[Any]:
+        return [fn(*args, **kwargs) for fn, args, kwargs in hoisted_calls]
+
+    return _gen_hoisted_values
+
 
 class FakeRootModule(torch.nn.Module):
     """Trick the constructor of fx.GraphModule"""
@@ -700,6 +706,10 @@ class OutputGraph(OutputGraphCommon):
         # random_calls tracks calls to random() and random_values_var stores the name of
         # the variable that stores __gen_rand_values results.
         self.random_calls: list[
+            tuple[Callable[..., object], tuple[object, ...], dict[str, object]]
+        ] = []
+        #TODO: Determine what we actually expect in here.
+        self.hoisted_calls: list[
             tuple[Callable[..., object], tuple[object, ...], dict[str, object]]
         ] = []
         self.random_values_var: Any = None
@@ -1531,6 +1541,28 @@ class OutputGraph(OutputGraphCommon):
         root = FakeRootModule(nn_modules_proxies)
 
         from .decorators import disable
+
+        if len(self.hoisted_calls) > 0:
+            hoisted_calls_instructions = []
+            self.hoisted_values_var = self.new_var("hoisted_values")
+            hoisted_fn = disable(
+                _get_gen_hoisted_values_fn(self.hoisted_calls),
+                reason="do not trace into hoisted function",
+            )
+            hoisted_fn_name = self.install_global("__gen_hoisted_values", 
+                                                  hoisted_fn)
+            codegen = PyCodegen(
+                self.root_tx, root, overridden_sources=overridden_sources
+            )
+            hoisted_calls_instructions.extend(
+                codegen.load_function_name(hoisted_fn_name, True)
+            )
+            hoisted_calls_instructions.extend(create_call_function(0, False))
+            hoisted_calls_instructions.append(
+                codegen.create_store(self.hoisted_values_var),
+            )
+            self.add_output_instructions(hoisted_calls_instructions)
+
 
         # to handle random calls
         if len(self.random_calls) > 0:
