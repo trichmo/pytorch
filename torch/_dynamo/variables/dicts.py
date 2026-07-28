@@ -40,6 +40,7 @@ from ..source import (
     DictGetItemSource,
     is_constant_source,
     is_from_local_source,
+    is_from_consumable_source,
 )
 from ..utils import (
     _item_debug_repr,
@@ -148,10 +149,14 @@ class ConstDictVariable(VariableTracker):
 
         items_cls = cast(type, self._cpython_type)
         self.items = items_cls({make_hashable(x): v for x, v in items.items()})
-        # need to reconstruct everything if the dictionary is an intermediate value
-        # or if a pop/delitem was executed
+        # need to reconstruct everything if the dictionary is an intermediate
+        # value, if a pop/delitem was executed, or if it is a Consumable input
+        # (the box is consumed by take(), so there is no original object to
+        # alias -- every item must be rebuilt from graph outputs)
         self.should_reconstruct_all = (
-            not is_from_local_source(self.source) if self.source else True
+            not is_from_local_source(self.source) or is_from_consumable_source(self.source)
+            if self.source
+            else True
         )
         self.original_items = items.copy()
         # Re-entrancy guard for is_python_constant against self-referential

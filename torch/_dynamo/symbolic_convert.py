@@ -114,6 +114,7 @@ from .exc import (
 )
 from .funcname_cache import get_funcname
 from .guards import GuardBuilder, install_guard
+from .consumable import Consumable, _unwrap_for_resume
 from .output_graph import (
     CodeOptions,
     GraphCompileReason,
@@ -158,7 +159,12 @@ from .utils import (
     unpack_iterable,
 )
 from .variables.base import SourceLocation, typestr, ValueMutationNew, VariableTracker
-from .variables.builder import FrameStateSizeEntry, VariableBuilder, wrap_fx_proxy
+from .variables.builder import (
+    FrameStateSizeEntry,
+    unwrap_consumable_for_tracing,
+    VariableBuilder,
+    wrap_fx_proxy,
+)
 from .variables.builtin import BuiltinVariable, DictBuiltinVariable
 from .variables.constant import ConstantVariable
 from .variables.ctx_manager import (
@@ -3576,9 +3582,29 @@ class InstructionTranslatorBase(
                             meta.num_stack + meta.locals_names[locals_key]
                         ),
                         cg.create_binary_subscr(),
-                        *create_swap(2),
                     ],
                 )
+                if isinstance(self.symbolic_locals.get(locals_key), TensorVariable):
+                    # Box so the resume function's own retrace still sees a
+                    # canonical value, while letting the current (blocked,
+                    # non-tail-call) frame drop its reference to this value
+                    # via the box instead of pinning it via `frames` for the
+                    # entire time the resume function runs. Route through a
+                    # temp local rather than reordering the call inline, so
+                    # the surrounding frames[i] stack-juggling above/below is
+                    # left untouched.
+                    tempvar = self.output.new_var()
+                    cg.append_output(cg.create_store(tempvar))
+                    cg.add_push_null(
+                        lambda: cg.load_import_from(
+                            "torch._dynamo.consumable",
+                            "_box_for_resume_forwarding",
+                        )
+                    )
+                    cg.append_output(cg.create_load(tempvar))
+                    cg.call_function(1, False)
+                    cg.append_output(cg.create_delete(tempvar))
+                cg.extend_output(create_swap(2))
             # current stack state: frames, frames[i], *(frame i live locals), frames[i]
             cg.extend_output(
                 [
@@ -3635,6 +3661,12 @@ class InstructionTranslatorBase(
             code_context.get_context(new_code)["orig_graphmodule"] = weakref.ref(
                 orig_graphmodule_maybe
             )
+
+        # Make the resume-arg-unboxing helper (used unconditionally by every
+        # resume function's generated prologue, see resume_execution.py's
+        # _unwrap_resume_arg_template) resolvable as a global in this module,
+        # since the resume function shares this f_globals dict.
+        self.f_globals.setdefault("__unwrap_for_resume", _unwrap_for_resume)
 
         # add resume function to the global scope
         self.output.install_resume_function_global(
@@ -5689,15 +5721,22 @@ class InstructionTranslator(InstructionTranslatorBase):
                     local_dynamism = None
                     if dynamism:
                         local_dynamism = frozenset(dynamism.get(name, {}).items())
+                    local_source = LocalSource(
+                        name,
+                        is_input=True,
+                        dynamism=local_dynamism,
+                        is_varargs=(name == varargs_name),
+                        is_varkw=(name == varkw_name),
+                    )
+                    if isinstance(value, Consumable):
+                        value, source = unwrap_consumable_for_tracing(
+                            value, local_source, self.output, name
+                        )
+                    else:
+                        source = local_source
                     var = LazyVariableTracker.create(
                         value,
-                        LocalSource(
-                            name,
-                            is_input=True,
-                            dynamism=local_dynamism,
-                            is_varargs=(name == varargs_name),
-                            is_varkw=(name == varkw_name),
-                        ),
+                        source,
                         tx=self,
                     )
                     self.symbolic_locals[name] = var

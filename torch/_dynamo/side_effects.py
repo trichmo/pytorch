@@ -51,7 +51,14 @@ from .bytecode_transformation import (
 )
 from .codegen import PyCodegen
 from .exc import collapse_resume_frames, get_stack_above_dynamo, unimplemented
-from .source import AttrSource, GlobalSource, LocalCellSource, Source, TempLocalSource
+from .source import (
+    AttrSource,
+    GlobalSource,
+    is_from_consumable_source,
+    LocalCellSource,
+    Source,
+    TempLocalSource,
+)
 from .utils import (
     is_frozen_dataclass,
     is_namedtuple_cls,
@@ -1509,6 +1516,10 @@ class SideEffects:
             if not config.replay_side_effects and not isinstance(
                 var.source, TempLocalSource
             ):
+                continue
+
+            # A moved container has no caller-visible original
+            if var.source is not None and is_from_consumable_source(var.source):
                 continue
 
             ctx = SideEffectReplayContext(

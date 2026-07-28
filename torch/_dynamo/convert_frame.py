@@ -59,6 +59,7 @@ import torch
 import torch._logging
 from torch._C._dynamo.guards import GlobalStateGuard
 from torch._dynamo.callback import CallbackTrigger
+from torch._dynamo.consumable import Consumable
 from torch._dynamo.distributed import get_compile_pg
 from torch._dynamo.symbolic_convert import TensorifyState
 from torch._guards import compile_context, CompileContext, CompileId, tracing
@@ -455,6 +456,9 @@ def has_tensor_in_frame(frame: DynamoFrameType) -> bool:
             return seen_ids[obj_id]
         elif is_namedtuple(obj) and hasattr(obj, "_fields"):
             seen_ids[obj_id] = any(has_tensor(getattr(obj, v)) for v in obj._fields)
+            return seen_ids[obj_id]
+        elif isinstance(obj, Consumable):
+            seen_ids[obj_id] = has_tensor(obj.value)
             return seen_ids[obj_id]
         else:
             # if config.debug:

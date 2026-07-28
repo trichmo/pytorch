@@ -354,6 +354,43 @@ class CellContentsSource(AttrSource):
 
 
 @dataclass_with_cached_hash(frozen=True)
+class ConsumableSource(AttrSource):
+    """
+    Source for Consumable wrapper inputs. Guards access ._value non-destructively
+    (inherited AttrSource getattr). Reconstruction emits a single destructive
+    take() that transfers ownership of the value out of the box; the pre-graph
+    prologue caches the taken value as a tempvar (see make_call_generated_code),
+    so a consumable container feeding several graph inputs is taken exactly once and
+    the box's element accesses replay on top of the taken value.
+    """
+
+    def __post_init__(self) -> None:
+        if not self.base:
+            raise AssertionError(
+                "Can't construct a ConsumableSource without a valid base source"
+            )
+        if self.member != "_value":
+            raise AssertionError(
+                "ConsumableSource should only be used with member='_value'"
+            )
+
+    def reconstruct(self, codegen: "PyCodegen") -> None:
+        def gen_fn() -> None:
+            codegen(self.base)
+            codegen.extend_output(codegen.create_load_attrs("take"))
+
+        codegen.add_push_null(gen_fn)
+        codegen.extend_output(create_call_function(0, False))
+
+    def reconstruct_pycode(self, codegen: "PyCodegen") -> str:
+        # Mirrors reconstruct(): a single destructive take() in the prologue.
+        # The pycode path (use_python_codegen) is an alternative to the bytecode
+        # path, never run alongside it, so exactly one take() happens either way.
+        base = self.base.reconstruct_pycode(codegen)
+        return f"{base}.take()"
+
+
+@dataclass_with_cached_hash(frozen=True)
 class GenericAttrSource(ChainedSource):
     member: str
 
@@ -1354,6 +1391,25 @@ def is_from_source(source: Source, target: Source) -> bool:
     if isinstance(source, ChainedSource):
         return is_from_source(source.base, target)
     return False
+
+
+@functools.lru_cache
+def is_from_consumable_source(source: Source) -> bool:
+    if isinstance(source, ConsumableSource):
+        return True
+    if isinstance(source, ChainedSource):
+        return is_from_consumable_source(source.base)
+    return False
+
+
+@functools.lru_cache
+def consumable_source_node(source: Source) -> Source:
+    cur = source
+    while not isinstance(cur, ConsumableSource):
+        if not isinstance(cur, ChainedSource):
+            raise AssertionError("source is not rooted at a ConsumableSource")
+        cur = cur.base
+    return cur
 
 
 @functools.lru_cache

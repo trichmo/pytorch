@@ -66,6 +66,7 @@ from ..source import (
     CallFunctionNoArgsSource,
     DictGetItemSource,
     GetItemSource,
+    is_from_consumable_source,
     RandomValueSource,
     TypeDictSource,
     TypeMROSource,
@@ -5240,7 +5241,12 @@ class UserDefinedTupleVariable(UserDefinedObjectVariable):
         # UserDefinedDictVariable doesn't need this because it's never created
         # sourceless — it only comes from VariableBuilder which always has a
         # source.
-        if self.source is not None:
+        #
+        # Consumable inputs are the other case that reaches here with a source:
+        # the box is consumed by a single take(), so there is no original object
+        # to alias and codegen skips source reconstruction (see PyCodegen). The
+        # tuple is rebuilt from its items, which reconstruct from graph outputs.
+        if self.source is not None and not is_from_consumable_source(self.source):
             raise AssertionError(
                 "reconstruct should only be called on sourceless tuples"
             )

@@ -41,7 +41,14 @@ from .bytecode_transformation import (
     Instruction,
 )
 from .exc import unimplemented
-from .source import AttrSource, ChainedSource, DictGetItemSource, Source
+from .source import (
+    AttrSource,
+    ChainedSource,
+    consumable_source_node,
+    DictGetItemSource,
+    is_from_consumable_source,
+    Source,
+)
 from .utils import is_safe_constant, rot_n_helper
 from .variables.base import ValueMutationExisting, VariableTracker
 from .variables.functions import (
@@ -296,10 +303,13 @@ class PyCodegen:
                 ],
             )
 
-        # Dynamo normally prefers codegen from source to account for aliasing.
+        # Any source rooted at a ConsumableSource is excluded: the box is consumed by
+        # a single destructive take() in the pre-graph prologue, so there is no
+        # live original to alias.
         if (
             value.source is not None
             and allow_cache
+            and not is_from_consumable_source(value.source)
             and not (
                 value.is_realized() and isinstance(value, LocalGeneratorObjectVariable)
             )
@@ -417,6 +427,12 @@ class PyCodegen:
                 else:
                     self.load_graph_output(graph_outputs[graph_outputs_key].index)
             else:
+                # ConsumableSource values fall through here: the initial-frame
+                # prologue already ran the destructive take() and transferred
+                # ownership of the tensor into the graph, so the raw graph output
+                # tensor is what both resume-function inputs and the frame's
+                # return value need. Reboxing into a Consumable here would leak a
+                # Consumable into the compiled output (compiled != eager).
                 self.load_graph_output(graph_outputs[graph_outputs_key].index)
         elif isinstance(value, NNModuleVariable):
             parts = value.module_key.split(".")
@@ -801,10 +817,8 @@ class PyCodegen:
             # noreturn leaves the template's implicit `return None` on the stack.
             self.pop_top()
 
-        arg_varnames = []
-        for i, arg in enumerate(graphargs):
+        def reconstruct_arg(arg: "GraphArg") -> str:
             arg_varname = self.tx.new_pycode_varname("arg")
-            arg_varnames.append(arg_varname)
             if arg.pass_arg_as_tensor:
                 self.add_push_null(
                     lambda: self.extend_output(
@@ -820,6 +834,32 @@ class PyCodegen:
             else:
                 self.call_reconstruct(arg)
                 self.add_pycode(f"{arg_varname} = {{}}", arg)
+            return arg_varname
+
+        # Consumable inputs use a boxed layout: the moved tensors are grouped into
+        # one list (matching the backend graph's single list placeholder) so the
+        # compiled fn can clear it and free them during graph execution.
+        consumable_positions: OrderedSet[int] = OrderedSet(
+            i
+            for i, arg in enumerate(graphargs)
+            if arg.source is not None and is_from_consumable_source(arg.source)
+        )
+        use_boxed_consumable = bool(consumable_positions)
+        arg_varnames: list[str] = []
+        consumable_varnames: list[str] = []
+        other_varnames: list[str] = []
+        if use_boxed_consumable:
+            for i, arg in enumerate(graphargs):
+                if i in consumable_positions:
+                    consumable_varnames.append(reconstruct_arg(arg))
+            self.extend_output(
+                [create_instruction("BUILD_LIST", arg=len(consumable_varnames))]
+            )
+            for i, arg in enumerate(graphargs):
+                if i not in consumable_positions:
+                    other_varnames.append(reconstruct_arg(arg))
+        else:
+            arg_varnames = [reconstruct_arg(arg) for arg in graphargs]
 
         if config.record_runtime_overhead:
             # Record the pregraph bytecode end, matched to the gated start above:
@@ -836,10 +876,54 @@ class PyCodegen:
             # noreturn leaves the template's implicit `return None` on the stack.
             self.pop_top()
 
-        self.extend_output(create_call_function(len(graphargs), False))
-        self.add_pycode(
-            f"__graph_out = {fn_name}({', '.join(arg_varnames)})",
+        taken_boxes: OrderedSet[Source] = OrderedSet(
+            consumable_source_node(arg.source)
+            for arg in graphargs
+            if arg.source is not None and is_from_consumable_source(arg.source)
         )
+        # When several boxes wrap the same value they dedupe to a single grapharg
+        for source in self.tx.output.consumable_box_sources:
+            box_node = consumable_source_node(source)
+            if box_node in taken_boxes:
+                continue
+            taken_boxes.add(box_node)
+            self.call_reconstruct(box_node)
+            self.pop_top()
+            self.add_pycode("{}", box_node)
+
+        for box_node in taken_boxes:
+            var = self.tempvars.get(box_node)
+            if var is not None:
+                self._output.append(self.create_delete(var))
+                del self.tempvars[box_node]
+
+        if use_boxed_consumable:
+            # The grouped consumable list is on the stack, followed by the other
+            # args. The reconstructed moved tensors now live only in that list,
+            # so once the compiled fn clears it they are freed during graph
+            # execution. Any CSE tempvars were deleted above.
+            call_varnames = [f"[{', '.join(consumable_varnames)}]", *other_varnames]
+            if self.tx.output.compiled_fn_boxed:
+                # Eager: the _BoxedCodeGen forward takes one list of all inputs.
+                self.extend_output(
+                    [create_instruction("BUILD_LIST", arg=len(call_varnames))]
+                )
+                self.extend_output(create_call_function(1, False))
+                self.add_pycode(
+                    f"__graph_out = {fn_name}([{', '.join(call_varnames)}])",
+                )
+            else:
+                # AOT/Inductor: flatten_graph_inputs' wrapper takes positional
+                # args; the consumable list is the first steal_arg argument.
+                self.extend_output(create_call_function(len(call_varnames), False))
+                self.add_pycode(
+                    f"__graph_out = {fn_name}({', '.join(call_varnames)})",
+                )
+        else:
+            self.extend_output(create_call_function(len(graphargs), False))
+            self.add_pycode(
+                f"__graph_out = {fn_name}({', '.join(arg_varnames)})",
+            )
 
     def create_import_name(self, module_name: str) -> Instruction:
         return create_instruction("IMPORT_NAME", argval=module_name)

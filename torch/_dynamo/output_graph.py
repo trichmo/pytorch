@@ -135,6 +135,7 @@ from .source import (
     GlobalStateSource,
     is_constant_source,
     is_from_local_source,
+    is_from_consumable_source,
     LocalSource,
     NumpyTensorSource,
     ParamBufferSource,
@@ -181,6 +182,7 @@ from .variables.nn_module import NNModuleVariable
 from .variables.tensor import (
     NumpyNdarrayVariable,
     SymNodeVariable,
+    TensorVariable,
     UnspecializedPythonVariable,
 )
 from .variables.torch_function import TensorWithTFOverrideVariable
@@ -736,6 +738,17 @@ class OutputGraph(OutputGraphCommon):
         # Map from graph input's `Source` to its `VariableTracker` to
         # de-duplicate graph inputs by source and reuse the tracker
         self.input_source_to_var: dict[Source, VariableTracker] = {}
+        # `ConsumableSource` for every Consumable box realized during tracing, root
+        # scoped so it survives subgraph tracer teardown. Aliasing Consumables
+        # dedupe to a single grapharg, but each box still owes a take() to null
+        # itself; codegen empties every box recorded here (see wrap_consumable).
+        self.consumable_box_sources: OrderedSet[Source] = OrderedSet()
+        # Set when the installed compiled fn uses the boxed calling convention
+        # (a single list arg that it clears). The pre-graph codegen then packs
+        # all graph inputs into one list and drops its other references so the
+        # moved tensors are freed during graph execution. See compile_subgraph
+        # (eager _BoxedCodeGen install) and PyCodegen.make_call_generated_code.
+        self.compiled_fn_boxed: bool = False
         # List of TensorVariables that are leaf tensors created in-graph
         # (e.g., nn.Parameter via tracable_create_parameter). These need to be
         # tracked separately from input_source_to_var for backward() auto-detection.
@@ -2411,7 +2424,29 @@ class OutputGraph(OutputGraphCommon):
                 unmodified_locals_names: dict[str, int] = {}
                 for k, v in self.root_tx.symbolic_locals.items():
                     if isinstance(v.source, LocalSource) and v.source.local_name == k:
-                        root_cg.append_output(root_cg.create_load(k))
+                        if isinstance(v, TensorVariable):
+                            # Box so the resume function's own retrace still sees
+                            # a canonical LocalSource(k)._value (never a boxed-slot
+                            # index -- see #192868/#185561), while letting us drop
+                            # this frame's own reference to k below: without this,
+                            # k stays alive in this (blocked, non-tail-call) frame
+                            # for the entire time the resume function runs. The
+                            # resume function's own prologue unwraps it via
+                            # _unwrap_for_resume (resume_execution.py), which is a
+                            # no-op if Dynamo retraces this frame (the value is
+                            # already unwrapped by frame entry by then) and a real
+                            # unwrap if it runs uncompiled.
+                            root_cg.add_push_null(
+                                lambda: root_cg.load_import_from(
+                                    "torch._dynamo.consumable",
+                                    "_box_for_resume_forwarding",
+                                )
+                            )
+                            root_cg.append_output(root_cg.create_load(k))
+                            root_cg.call_function(1, False)
+                            root_cg.append_output(root_cg.create_delete(k))
+                        else:
+                            root_cg.append_output(root_cg.create_load(k))
                         unmodified_locals_names[k] = len(meta.locals_names) + len(
                             unmodified_locals_names
                         )
@@ -3007,6 +3042,11 @@ class OutputGraph(OutputGraphCommon):
                     example_inputs[idx].fake_device = snapshot.fake_device  # type: ignore[union-attr]
 
             gm.graph.lint()
+            backend_gm, backend_example_inputs = gm, example_inputs
+            boxed = self._boxed_consumable_backend_gm(gm, root, example_inputs)
+            if boxed is not None:
+                backend_gm, backend_example_inputs = boxed
+                backend_gm.graph.lint()
             if is_noop_graph(gm):
                 # The graph can still be empty here even though the early check
                 # in this function passed: we decided to compile because there
@@ -3017,9 +3057,33 @@ class OutputGraph(OutputGraphCommon):
                 compiled_fn = noop_graph_call
             else:
                 with self.restore_global_state():
-                    compiled_fn = self.call_user_compiler(gm, example_inputs)
+                    compiled_fn = self.call_user_compiler(
+                        backend_gm, backend_example_inputs
+                    )
 
             from torch.fx._lazy_graph_module import _LazyGraphModule
+
+            # Consumable inputs, eager path: install the boxed calling convention
+            # codegen on the backend GraphModule before its forward is
+            # (re)materialized. The generated forward(self, args_list) takes a
+            # single list, binds each placeholder from it, then clears the list
+            # in place. Together with FX's default per-node deletions (which
+            # free the Consumable sublist after its last getitem and each getitem
+            # tensor after its last use), the moved tensors are freed during
+            # graph execution instead of being pinned by positional forward
+            # parameters for the whole call. Compiling backends (Inductor/AOT)
+            # instead free inputs via flatten_graph_inputs' boxed GmWrapper
+            # (triggered by the list example input) and are left untouched here.
+            # codegen passes a single list in both cases.
+            eager_gm = getattr(compiled_fn, "__self__", None)
+            use_boxed_codegen = boxed is not None and isinstance(
+                eager_gm, torch.fx.GraphModule
+            )
+            if use_boxed_codegen:
+                from torch.fx.graph import _BoxedCodeGen
+
+                eager_gm.graph.set_codegen(_BoxedCodeGen())  # type: ignore[union-attr]
+                self.compiled_fn_boxed = True
 
             if isinstance(compiled_fn, _LazyGraphModule) or (
                 isinstance(getattr(compiled_fn, "__self__", None), _LazyGraphModule)
@@ -3028,7 +3092,9 @@ class OutputGraph(OutputGraphCommon):
                 # Since dynamo will run the forward method for the GraphModule shortly
                 # anyways, it does not hurt to do the real recompilation here if
                 # this is a _LazyGraphModule. This makes it easier for dynamo to
-                # optimize a _LazyGraphModule.
+                # optimize a _LazyGraphModule. When the boxed codegen was
+                # installed above, this recompile regenerates forward with the
+                # boxed (args_list) signature.
 
                 lazy_gm = (
                     compiled_fn
@@ -3041,6 +3107,14 @@ class OutputGraph(OutputGraphCommon):
                 if not isinstance(compiled_fn, _LazyGraphModule):
                     # replace compiled_fn with the real forward method
                     compiled_fn = lazy_gm.forward
+            elif use_boxed_codegen:
+                # Non-lazy GraphModule: regenerate forward now that the boxed
+                # codegen is installed.
+                eager_gm.recompile()  # type: ignore[union-attr]
+
+            if use_boxed_codegen:
+                # Hand back the freshly generated boxed forward.
+                compiled_fn = eager_gm.forward  # type: ignore[union-attr]
 
             if not self.export:
                 # Run after every non-export backend compile, not only the
@@ -3129,11 +3203,15 @@ class OutputGraph(OutputGraphCommon):
                             return specialization_cache[specialization](*args, **kwargs)
                     return compiled_fn(*args, **kwargs)
 
-                # This is safe because we pre-process name to be unique
-                self.install_global_unsafe(name, specialized_dispatch)
+                to_install = specialized_dispatch
             else:
-                # This is safe because we pre-process name to be unique
-                self.install_global_unsafe(name, compiled_fn)
+                to_install = compiled_fn
+
+            # Consumable inputs need no runtime wrapper: the pre-graph prologue takes
+            # each box once and passes the taken tensor positionally, so the boxed
+            # calling convention frees it during execution like any graph input.
+            # This is safe because we pre-process name to be unique
+            self.install_global_unsafe(name, to_install)
 
             if self.root_tx is None:
                 raise AssertionError("root_tx must not be None")
@@ -3182,6 +3260,77 @@ class OutputGraph(OutputGraphCommon):
     @property
     def graphargs(self) -> list[GraphArg]:
         return [node.meta["grapharg"] for node in self.placeholders]
+
+    def _boxed_consumable_backend_gm(
+        self, gm: fx.GraphModule, root: torch.nn.Module, example_inputs: list[Tensor]
+    ) -> tuple[fx.GraphModule, list[Any]] | None:
+        # Consumable inputs: rebuild the backend-facing graph so every consumable
+        # placeholder is fed from a single steal_arg list placeholder via
+        # getitem, and group the matching example inputs into one sublist.
+        # AOTAutograd/Inductor see the bumpy input and route through
+        # flatten_graph_inputs' boxed GmWrapper, which clears the list so the
+        # moved tensors are freed during graph execution instead of being
+        # pinned for the whole call by a positional forward parameter.
+        # self.graph itself stays flat: codegen, guards, and export metadata
+        # all keep reading the original per-placeholder graphargs.
+        placeholders = self.placeholders
+        graphargs = [pl.meta["grapharg"] for pl in placeholders]
+        consumable_idx = [
+            i
+            for i, arg in enumerate(graphargs)
+            if arg.source is not None and is_from_consumable_source(arg.source)
+        ]
+        if not consumable_idx:
+            return None
+        consumable_set = OrderedSet(consumable_idx)
+
+        new_graph = fx.Graph()
+        env: dict[fx.Node, fx.Node] = {}
+        list_ph = new_graph.placeholder("consumable_inputs")
+        list_ph.meta["steal_arg"] = True
+        # Use the placeholders' fake example values, not the real example_inputs:
+        # this meta is cached with the boxed GraphModule, so storing real tensors
+        # would pin the moved inputs for the artifact's lifetime (defeating the
+        # move). The eager backend keeps boxed_gm.forward directly and never runs
+        # flatten_graph_inputs' list-clearing wrapper, so real tensors here leak.
+        list_ph.meta["example_value"] = [
+            placeholders[i].meta["example_value"] for i in consumable_idx
+        ]
+        # No real source backs the synthesized list; give it one so the
+        # placeholder-source pass in _call_user_compiler skips it.
+        list_ph._dynamo_source = SyntheticLocalSource("consumable_inputs")  # type: ignore[attr-defined]
+        for i in range(len(placeholders)):
+            if i in consumable_set:
+                continue
+            old_ph = placeholders[i]
+            new_ph = new_graph.placeholder(old_ph.target)  # type: ignore[arg-type]
+            new_ph.meta.update(old_ph.meta)
+            env[old_ph] = new_ph
+        for slot, i in enumerate(consumable_idx):
+            old_ph = placeholders[i]
+            gi = new_graph.call_function(operator.getitem, (list_ph, slot))
+            gi.meta.update(old_ph.meta)
+            gi.meta.pop("grapharg", None)
+            env[old_ph] = gi
+        for node in self.graph.nodes:
+            if node.op == "placeholder":
+                continue
+            env[node] = new_graph.node_copy(node, lambda n: env[n])
+
+        boxed_gm = _make_graph_module(root, new_graph)
+        # Carry over the metadata backends read off the GraphModule, since the
+        # backend now sees this restructured module instead of the flat gm.
+        boxed_gm.meta.update(gm.meta)
+        boxed_gm.compile_subgraph_reason = gm.compile_subgraph_reason  # type: ignore[attr-defined]
+        if hasattr(gm, "_backend_id"):
+            boxed_gm._backend_id = gm._backend_id  # type: ignore[attr-defined]
+        boxed_example_inputs: list[Any] = [[example_inputs[i] for i in consumable_idx]]
+        boxed_example_inputs.extend(
+            example_inputs[i]
+            for i in range(len(example_inputs))
+            if i not in consumable_set
+        )
+        return boxed_gm, boxed_example_inputs
 
     def call_user_compiler(
         self, gm: fx.GraphModule, example_inputs: list[Tensor]

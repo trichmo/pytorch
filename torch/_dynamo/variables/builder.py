@@ -122,6 +122,7 @@ from .. import config, graph_break_hints, mutation_guard, replay_record, trace_r
 from ..device_interface import get_registered_device_interfaces
 from ..exc import InternalTorchDynamoError, raise_observed_exception, unimplemented
 from ..guards import GuardBuilder, install_guard, make_dupe_guard
+from ..consumable import Consumable
 from ..pgo import (
     auto_dynamic,
     auto_unset,
@@ -152,6 +153,7 @@ from ..source import (
     is_from_unspecialized_nn_module_source,
     ListGetItemSource,
     LocalSource,
+    ConsumableSource,
     NNModuleSource,
     NonSerializableSetGetItemSource,
     NumpyTensorSource,
@@ -352,6 +354,7 @@ except ModuleNotFoundError:
 
 if TYPE_CHECKING:
     from torch._dynamo.codegen import PyCodegen
+    from torch._dynamo.output_graph import OutputGraph
     from torch._dynamo.symbolic_convert import InstructionTranslatorBase
 
 
@@ -797,6 +800,22 @@ def _is_dim_dynamic_from_source_dynamism(
     return dim_dynamism is not None and dim < len(dim_dynamism) and dim_dynamism[dim]
 
 
+def unwrap_consumable_for_tracing(
+    box: Consumable, box_source: Source, output: "OutputGraph", arg_name: str | None = None
+) -> tuple[Any, ConsumableSource]:
+    """Unwrap a Consumable box encountered during tracing."""
+    if box._value is None:
+        where = f" argument '{arg_name}'" if arg_name is not None else ""
+        raise RuntimeError(
+            f"Consumable{where} has already been taken. "
+            "Create a fresh Consumable for each call to the compiled function."
+        )
+    install_guard(box_source.make_guard(GuardBuilder.TYPE_MATCH))
+    consumable_source = ConsumableSource(box_source, "_value")
+    output.consumable_box_sources.add(consumable_source)
+    return box._value, consumable_source
+
+
 class VariableBuilder:
     """Wrap a python value in a VariableTracker() instance"""
 
@@ -947,6 +966,7 @@ class VariableBuilder:
             (torch.utils.hooks.RemovableHandle, cls.wrap_removable_handle),
             (torch.jit.ScriptFunction, cls.wrap_jit_function),
             (types.MappingProxyType, cls.wrap_mapping_proxy),
+            (Consumable, cls.wrap_consumable),
         ]
 
         if trace_numpy and np:
@@ -962,6 +982,12 @@ class VariableBuilder:
                 result[t] = fn
 
         return result
+
+    def wrap_consumable(self, value: Consumable) -> VariableTracker:
+        inner_value, inner_source = unwrap_consumable_for_tracing(
+            value, self.source, self.tx.output
+        )
+        return VariableBuilder(self.tx, inner_source)(inner_value)
 
     def wrap_regex_pattern(
         self, value: re.Pattern[Any] | re.Match[Any]

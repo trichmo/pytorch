@@ -988,7 +988,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         self.assertEqual(ref, x + 4)
         self.assertEqual(foo.attr, x + 3)
         self.assertEqual(cnts.frame_count, 2)
-        self.assertEqual(cnts.op_count, 3)
+        self.assertEqual(cnts.op_count, 4)
 
     def test_nested_store_subscr_graph_break(self):
         class Foo:
@@ -1011,7 +1011,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         self.assertEqual(ref, x + 4)
         self.assertEqual(foo.attr, x + 3)
         self.assertEqual(cnts.frame_count, 2)
-        self.assertEqual(cnts.op_count, 3)
+        self.assertEqual(cnts.op_count, 4)
 
     def test_functorch_with_nested_graph_break(self):
         def f1(x):
@@ -1399,7 +1399,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         result = f(x)
         self.assertEqual(result.shape, torch.Size([10]))
         self.assertEqual(cnts.frame_count, 1)
-        self.assertEqual(cnts.op_count, 1)
+        self.assertEqual(cnts.op_count, 2)
 
     def test_graph_break_during_user_class_init(self):
         """Graph break during user class __init__ via instantiate_user_defined_class_object.
@@ -1426,7 +1426,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         result = f(x)
         self.assertEqual(result, x * 2)
         self.assertEqual(cnts.frame_count, 1)
-        self.assertEqual(cnts.op_count, 1)
+        self.assertEqual(cnts.op_count, 2)
 
     def test_graph_break_during_user_class_new(self):
         """Graph break during __new__ via instantiate_user_defined_class_object.
@@ -1455,7 +1455,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         result = f(x)
         self.assertEqual(result, x + 3)
         self.assertEqual(cnts.frame_count, 1)
-        self.assertEqual(cnts.op_count, 1)
+        self.assertEqual(cnts.op_count, 2)
 
     def test_graph_break_in_copy_deepcopy(self):
         """copy.deepcopy is a BUILTIN_INLINE_WHEN_CALLED function that contains
@@ -1478,7 +1478,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         result = f(x)
         self.assertEqual(result.shape, torch.Size([10]))
         self.assertEqual(cnts.frame_count, 2)
-        self.assertEqual(cnts.op_count, 2)
+        self.assertEqual(cnts.op_count, 3)
 
     def test_inlined_function_globals_across_graph_break(self):
         """Module-level globals in inlined functions survive graph breaks.
@@ -1519,7 +1519,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         print(ref, res)
         self.assertEqual(ref, res)
         self.assertEqual(cnts.frame_count, 2)
-        self.assertEqual(cnts.op_count, 6)
+        self.assertEqual(cnts.op_count, 7)
 
     def test_nested_graph_break_in_custom_ctx_manager_init(self):
         def f(x):
@@ -1536,7 +1536,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         # manager is entered, so the pre-break graph is empty (not compiled).
         # Only the resume (enter + `x + 1` + exit) is compiled: 1 frame, 1 op.
         self.assertEqual(cnts.frame_count, 1)
-        self.assertEqual(cnts.op_count, 1)
+        self.assertEqual(cnts.op_count, 2)
 
     def test_ctx_manager_passed_as_sourced_arg(self):
         # A ctx manager passed in as an argument is sourced, so it is wrapped
