@@ -39,7 +39,7 @@ from .bytecode_transformation import (
     Instruction,
 )
 from .exc import unimplemented
-from .source import AttrSource, ChainedSource, DictGetItemSource, Source
+from .source import AttrSource, ChainedSource, DictGetItemSource, MovableSource, Source
 from .utils import is_safe_constant, rot_n_helper
 from .variables.base import ValueMutationExisting, VariableTracker
 from .variables.functions import (
@@ -275,9 +275,13 @@ class PyCodegen:
             )
 
         # Dynamo normally prefers codegen from source to account for aliasing.
+        # MovableSource is excluded: its reconstruct() calls .take() which is
+        # destructive and must only run once (in the prologue). For resume locals,
+        # we fall through to the graph output path and re-wrap in Movable().
         if (
             value.source is not None
             and allow_cache
+            and not isinstance(value.source, MovableSource)
             and not (
                 value.is_realized() and isinstance(value, LocalGeneratorObjectVariable)
             )
@@ -368,6 +372,12 @@ class PyCodegen:
 
                 self.add_push_null(gen_fn)
                 output.extend(create_call_function(0, False))
+            elif isinstance(value.source, MovableSource):
+                self.add_push_null(
+                    lambda: self.load_import_from("torch._dynamo.movable", "Movable")
+                )
+                self.load_graph_output(graph_outputs[graph_outputs_key].index)
+                output.extend(create_call_function(1, False))
             else:
                 self.load_graph_output(graph_outputs[graph_outputs_key].index)
         elif isinstance(value, NNModuleVariable):

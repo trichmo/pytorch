@@ -131,6 +131,7 @@ from .resume_execution import (
     IS_TRACING_RESUME_PROLOGUE_VARNAME,
     ReenterWith,
 )
+from .movable import Movable
 from .source import (
     AttrSource,
     DictGetItemSource,
@@ -138,6 +139,7 @@ from .source import (
     GlobalWeakRefSource,
     LocalCellSource,
     LocalSource,
+    MovableSource,
     SkipGuardSource,
     Source,
 )
@@ -5638,15 +5640,26 @@ class InstructionTranslator(InstructionTranslatorBase):
                     local_dynamism = None
                     if dynamism:
                         local_dynamism = frozenset(dynamism.get(name, {}).items())
+                    local_source = LocalSource(
+                        name,
+                        is_input=True,
+                        dynamism=local_dynamism,
+                        is_varargs=(name == varargs_name),
+                        is_varkw=(name == varkw_name),
+                    )
+                    if isinstance(value, Movable):
+                        if value._value is None:
+                            raise RuntimeError(
+                                f"Movable argument '{name}' has already been taken. "
+                                "Create a fresh Movable for each call to the compiled function."
+                            )
+                        value = value._value
+                        source = MovableSource(local_source, "_value")
+                    else:
+                        source = local_source
                     var = LazyVariableTracker.create(
                         value,
-                        LocalSource(
-                            name,
-                            is_input=True,
-                            dynamism=local_dynamism,
-                            is_varargs=(name == varargs_name),
-                            is_varkw=(name == varkw_name),
-                        ),
+                        source,
                         tx=self,
                     )
                     self.symbolic_locals[name] = var

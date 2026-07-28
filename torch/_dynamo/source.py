@@ -354,6 +354,37 @@ class CellContentsSource(AttrSource):
 
 
 @dataclass_with_cached_hash(frozen=True)
+class MovableSource(AttrSource):
+    """
+    Source for Movable wrapper inputs. Guards access ._value non-destructively,
+    but reconstruction calls .take() for ownership transfer.
+    """
+
+    def __post_init__(self) -> None:
+        if not self.base:
+            raise AssertionError(
+                "Can't construct a MovableSource without a valid base source"
+            )
+        if self.member != "_value":
+            raise AssertionError(
+                "MovableSource should only be used with member='_value'"
+            )
+
+    def reconstruct(self, codegen: "PyCodegen") -> None:
+        codegen.add_push_null(
+            lambda: (
+                codegen(self.base),
+                codegen.extend_output(codegen.create_load_attrs("take")),
+            )
+        )
+        codegen.extend_output(create_call_function(0, False))
+
+    def reconstruct_pycode(self, codegen: "PyCodegen") -> str:
+        base = self.base.reconstruct_pycode(codegen)
+        return f"{base}.take()"
+
+
+@dataclass_with_cached_hash(frozen=True)
 class GenericAttrSource(ChainedSource):
     member: str
 

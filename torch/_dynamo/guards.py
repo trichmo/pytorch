@@ -148,6 +148,7 @@ from .source import (
     ImportSource,
     ListGetItemSource,
     LocalSource,
+    MovableSource,
     NamedTupleFieldsSource,
     NNModuleSource,
     NonSerializableSetGetItemSource,
@@ -1775,7 +1776,13 @@ class GuardBuilder(GuardBuilderBase):
                 guard_manager_enum=guard_manager_enum,
             )
         elif istype(
-            source, (AttrSource, CellContentsSource, UnspecializedParamBufferSource)
+            source,
+            (
+                AttrSource,
+                CellContentsSource,
+                MovableSource,
+                UnspecializedParamBufferSource,
+            ),
         ):
             if not base_guard_manager:  # to make mypy happy
                 raise AssertionError("base_guard_manager must not be None")
