@@ -120,6 +120,7 @@ from .. import config, graph_break_hints, mutation_guard, replay_record, trace_r
 from ..device_interface import get_registered_device_interfaces
 from ..exc import InternalTorchDynamoError, raise_observed_exception, unimplemented
 from ..guards import GuardBuilder, install_guard, make_dupe_guard
+from ..movable import Movable
 from ..pgo import (
     auto_dynamic,
     auto_unset,
@@ -150,6 +151,7 @@ from ..source import (
     is_from_unspecialized_nn_module_source,
     ListGetItemSource,
     LocalSource,
+    MovableSource,
     NNModuleSource,
     NonSerializableSetGetItemSource,
     NumpyTensorSource,
@@ -936,6 +938,7 @@ class VariableBuilder:
             (torch.utils.hooks.RemovableHandle, cls.wrap_removable_handle),
             (torch.jit.ScriptFunction, cls.wrap_jit_function),
             (types.MappingProxyType, cls.wrap_mapping_proxy),
+            (Movable, cls.wrap_movable),
         ]
 
         if trace_numpy and np:
@@ -951,6 +954,16 @@ class VariableBuilder:
                 result[t] = fn
 
         return result
+
+    def wrap_movable(self, value: Movable) -> VariableTracker:
+        if value._value is None:
+            raise RuntimeError(
+                "Movable has already been taken. "
+                "Create a fresh Movable for each call to the compiled function."
+            )
+        self.install_guards(GuardBuilder.TYPE_MATCH)
+        inner_source = MovableSource(self.source, "_value")
+        return VariableBuilder(self.tx, inner_source)(value._value)
 
     def wrap_regex_pattern(
         self, value: re.Pattern[Any] | re.Match[Any]

@@ -276,8 +276,13 @@ class PyCodegen:
 
         # Dynamo normally prefers codegen from source to account for aliasing.
         # MovableSource is excluded: its reconstruct() calls .take() which is
-        # destructive and must only run once (in the prologue). For resume locals,
-        # we fall through to the graph output path and re-wrap in Movable().
+        # destructive and must only run once (in the prologue). Such values fall
+        # through to the graph output path and are emitted as raw tensors (the
+        # initial-frame take already transferred ownership into the graph).
+        # KNOWN-OPEN: move semantics do not propagate into the resume region; if
+        # desired, extend Dynamo's local boxing/unboxing across the graph-break
+        # boundary rather than reboxing a Movable here (which would leak a Movable
+        # into the compiled output).
         if (
             value.source is not None
             and allow_cache
@@ -372,13 +377,13 @@ class PyCodegen:
 
                 self.add_push_null(gen_fn)
                 output.extend(create_call_function(0, False))
-            elif isinstance(value.source, MovableSource):
-                self.add_push_null(
-                    lambda: self.load_import_from("torch._dynamo.movable", "Movable")
-                )
-                self.load_graph_output(graph_outputs[graph_outputs_key].index)
-                output.extend(create_call_function(1, False))
             else:
+                # MovableSource values fall through here: the initial-frame
+                # prologue already ran the destructive take() and transferred
+                # ownership of the tensor into the graph, so the raw graph output
+                # tensor is what both resume-function inputs and the frame's
+                # return value need. Reboxing into a Movable here would leak a
+                # Movable into the compiled output (compiled != eager).
                 self.load_graph_output(graph_outputs[graph_outputs_key].index)
         elif isinstance(value, NNModuleVariable):
             parts = value.module_key.split(".")

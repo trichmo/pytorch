@@ -3511,6 +3511,7 @@ MOD_INLINELIST = [
     "torch._dynamo._trace_wrapped_higher_order_op",
     "torch._dynamo.compiled_autograd",
     "torch._dynamo.comptime",
+    "torch._dynamo.movable",
     "torch._dynamo.polyfills",
     "torch._dynamo.test_case",
     "torch._export.non_strict_utils",

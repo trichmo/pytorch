@@ -371,15 +371,17 @@ class MovableSource(AttrSource):
             )
 
     def reconstruct(self, codegen: "PyCodegen") -> None:
-        codegen.add_push_null(
-            lambda: (
-                codegen(self.base),
-                codegen.extend_output(codegen.create_load_attrs("take")),
-            )
-        )
+        def gen_fn() -> None:
+            codegen(self.base)
+            codegen.extend_output(codegen.create_load_attrs("take"))
+
+        codegen.add_push_null(gen_fn)
         codegen.extend_output(create_call_function(0, False))
 
     def reconstruct_pycode(self, codegen: "PyCodegen") -> str:
+        # Mirrors reconstruct(): a single destructive take() in the prologue.
+        # The pycode path (use_python_codegen) is an alternative to the bytecode
+        # path, never run alongside it, so exactly one take() happens either way.
         base = self.base.reconstruct_pycode(codegen)
         return f"{base}.take()"
 

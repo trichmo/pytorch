@@ -113,6 +113,7 @@ from .exc import (
 )
 from .funcname_cache import get_funcname
 from .guards import GuardBuilder, install_guard
+from .movable import Movable
 from .output_graph import (
     CodeOptions,
     GraphCompileReason,
@@ -131,7 +132,6 @@ from .resume_execution import (
     IS_TRACING_RESUME_PROLOGUE_VARNAME,
     ReenterWith,
 )
-from .movable import Movable
 from .source import (
     AttrSource,
     DictGetItemSource,
@@ -5653,6 +5653,10 @@ class InstructionTranslator(InstructionTranslatorBase):
                                 f"Movable argument '{name}' has already been taken. "
                                 "Create a fresh Movable for each call to the compiled function."
                             )
+                        # Guard on the box type so this specialized code is only
+                        # reused when the arg is actually a Movable; mirrors
+                        # VariableBuilder.wrap_movable.
+                        install_guard(local_source.make_guard(GuardBuilder.TYPE_MATCH))
                         value = value._value
                         source = MovableSource(local_source, "_value")
                     else:

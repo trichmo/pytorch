@@ -1,6 +1,9 @@
+import functools
 import sys
 import warnings
-from typing import Iterator
+from collections.abc import Iterator
+
+import torch.compiler
 
 
 def _baseline_refcount() -> int:
@@ -34,8 +37,12 @@ class Movable:
 
     def take(self) -> object:
         val = self._value
+        if val is None:
+            raise RuntimeError(
+                "Movable has already been taken. "
+                "Create a fresh Movable for each call to the compiled function."
+            )
         self._value = None
-        assert val is not None
         return val
 
     @property
@@ -43,6 +50,41 @@ class Movable:
         if self._value is None:
             raise RuntimeError("value has been moved")
         return self._value
+
+
+def _is_compiled(fn: object) -> bool:
+    from torch._dynamo.eval_frame import _TorchDynamoContext, OptimizedModule
+
+    if isinstance(fn, (OptimizedModule, _TorchDynamoContext)):
+        return True
+    # torch.compile() on a plain function returns a wrapper function that carries
+    # _torchdynamo_orig_callable; calling it drives Dynamo. The wrapper_id check
+    # mirrors eval_frame.innermost_fn so functools.wraps copies of the marker
+    # onto unrelated callables are not misdetected as compiled.
+    return getattr(fn, "_torchdynamo_orig_callable", None) is not None and getattr(
+        fn, "_torchdynamo_wrapper_id", None
+    ) == id(fn)
+
+
+def movable_call(fn):
+    """Decorator that unwraps Movable arguments for eager/compiled compatibility.
+
+    When the inner fn is compiled, or when Dynamo is tracing this wrapper,
+    passes Movable through so Dynamo handles ownership via MovableSource.
+    In pure eager mode, calls .take() on each Movable arg to extract the value.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if _is_compiled(fn) or torch.compiler.is_compiling():
+            return fn(*args, **kwargs)
+        args = tuple(a.take() if isinstance(a, Movable) else a for a in args)
+        kwargs = {
+            k: v.take() if isinstance(v, Movable) else v for k, v in kwargs.items()
+        }
+        return fn(*args, **kwargs)
+
+    return wrapper
 
 
 def movable_iter(iterable: object) -> Iterator[Movable]:
