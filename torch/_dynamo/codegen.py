@@ -39,7 +39,13 @@ from .bytecode_transformation import (
     Instruction,
 )
 from .exc import unimplemented
-from .source import AttrSource, ChainedSource, DictGetItemSource, MovableSource, Source
+from .source import (
+    AttrSource,
+    ChainedSource,
+    DictGetItemSource,
+    is_from_movable_source,
+    Source,
+)
 from .utils import is_safe_constant, rot_n_helper
 from .variables.base import ValueMutationExisting, VariableTracker
 from .variables.functions import (
@@ -275,18 +281,18 @@ class PyCodegen:
             )
 
         # Dynamo normally prefers codegen from source to account for aliasing.
-        # MovableSource is excluded: its reconstruct() calls .take() which is
-        # destructive and must only run once (in the prologue). Such values fall
-        # through to the graph output path and are emitted as raw tensors (the
-        # initial-frame take already transferred ownership into the graph).
-        # KNOWN-OPEN: move semantics do not propagate into the resume region; if
-        # desired, extend Dynamo's local boxing/unboxing across the graph-break
-        # boundary rather than reboxing a Movable here (which would leak a Movable
-        # into the compiled output).
+        # Any source rooted at a MovableSource is excluded: its reconstruct()
+        # calls .take(), which is destructive and must only run once (in the
+        # prologue). This covers both the box itself and element accesses like
+        # GetItemSource(MovableSource, key) into a movable container. Such values
+        # fall through to the graph output path and are emitted as raw tensors,
+        # so a movable value crossing a graph break -- including each element of a
+        # movable list/dict -- is rebuilt from graph outputs in the resume region
+        # rather than reboxed (which would leak a Movable into the output).
         if (
             value.source is not None
             and allow_cache
-            and not isinstance(value.source, MovableSource)
+            and not is_from_movable_source(value.source)
             and not (
                 value.is_realized() and isinstance(value, LocalGeneratorObjectVariable)
             )

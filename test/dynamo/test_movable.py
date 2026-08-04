@@ -12,6 +12,12 @@ from torch.testing._internal.common_utils import (
 )
 
 
+def _mk(movable_cls, value):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return movable_cls(value)
+
+
 @instantiate_parametrized_tests
 class TestMovable(TestCase):
     def test_basic(self):
@@ -522,6 +528,154 @@ class TestMovable(TestCase):
         result = fn({"x": m})
         self.assertEqual(result, t * 2)
         self.assertNotIsInstance(result, Movable)
+        self.assertIsNone(m._value)
+
+    def test_no_recompile_calling_movable_call_twice(self):
+        # Two calls with fresh Movables of the same tensor metadata must reuse the
+        # first compilation: the box TYPE_MATCH + inner TENSOR_MATCH guards hold.
+        cnt = torch._dynamo.testing.CompileCounter()
+
+        @movable_call
+        @torch.compile(backend=cnt)
+        def fn(x):
+            return x + 1
+
+        t1 = torch.randn(4)
+        r1 = fn(_mk(Movable, t1))
+        self.assertEqual(r1, t1 + 1)
+        self.assertEqual(cnt.frame_count, 1)
+
+        t2 = torch.randn(4)
+        r2 = fn(_mk(Movable, t2))
+        self.assertEqual(r2, t2 + 1)
+        self.assertEqual(cnt.frame_count, 1)
+
+    def test_dict_value_guards_match_plain(self):
+        # A Movable holding a dict must produce the same guards as passing the
+        # plain dict: no recompile for same structure, recompile when the accessed
+        # element's tensor metadata changes.
+        def build(counter_backend):
+            @torch.compile(backend=counter_backend)
+            def fn(d):
+                return d["a"] * 2
+
+            return fn
+
+        plain_cnt = torch._dynamo.testing.CompileCounter()
+        plain = build(plain_cnt)
+        plain({"a": torch.ones(4)})
+        plain({"a": torch.ones(4)})
+        plain({"a": torch.ones(8)})
+
+        torch._dynamo.reset()
+        mov_cnt = torch._dynamo.testing.CompileCounter()
+        mov = build(mov_cnt)
+        r1 = mov(_mk(Movable, {"a": torch.ones(4)}))
+        self.assertEqual(r1, torch.ones(4) * 2)
+        self.assertEqual(mov_cnt.frame_count, 1)
+        mov(_mk(Movable, {"a": torch.ones(4)}))
+        self.assertEqual(mov_cnt.frame_count, 1)
+        r3 = mov(_mk(Movable, {"a": torch.ones(8)}))
+        self.assertEqual(r3, torch.ones(8) * 2)
+        self.assertEqual(mov_cnt.frame_count, 2)
+
+        # The Movable path must not over- or under-guard relative to the plain path.
+        self.assertEqual(mov_cnt.frame_count, plain_cnt.frame_count)
+
+    def test_dynamic_shape_no_recompile(self):
+        # A tensor marked dynamic inside a Movable must not recompile when the
+        # dynamic dim changes size (the inner TENSOR_MATCH honors the symbolic dim).
+        cnt = torch._dynamo.testing.CompileCounter()
+
+        @torch.compile(backend=cnt)
+        def fn(x):
+            return x + 1
+
+        t1 = torch.randn(4)
+        torch._dynamo.mark_dynamic(t1, 0)
+        fn(_mk(Movable, t1))
+        self.assertEqual(cnt.frame_count, 1)
+
+        t2 = torch.randn(8)
+        torch._dynamo.mark_dynamic(t2, 0)
+        r = fn(_mk(Movable, t2))
+        self.assertEqual(r, t2 + 1)
+        self.assertEqual(cnt.frame_count, 1)
+
+    @parametrize("container", ["dict", "list"])
+    def test_movable_container_survives_graph_break(self, container):
+        # A Movable holding a container (dict/list) that survives a graph break
+        # must reconstruct the container for the resume region from graph outputs
+        # -- the box is consumed by a single take(), so there is no aliasable
+        # original object. Each element crosses the break as a raw Tensor.
+        def eager(c):
+            if container == "dict":
+                y = c["a"] + 1
+                return c["a"] + y
+            y = c[0] + 1
+            return c[0] + y
+
+        @torch.compile(backend="eager")
+        def fn(c):
+            if container == "dict":
+                y = c["a"] + 1
+                torch._dynamo.graph_break()
+                return c["a"] + y
+            y = c[0] + 1
+            torch._dynamo.graph_break()
+            return c[0] + y
+
+        t = torch.ones(4)
+        raw = {"a": t} if container == "dict" else [t]
+        m = _mk(Movable, {"a": t} if container == "dict" else [t])
+        result = fn(m)
+        self.assertEqual(result, eager(raw))
+        self.assertNotIsInstance(result, Movable)
+        self.assertIsNone(m._value)
+
+    def test_movable_dict_extra_key_survives_graph_break(self):
+        # A key not used before the break must still be present after it: the
+        # container is fully rebuilt, and the unused element is materialized as a
+        # graph output on demand.
+        def eager(d):
+            y = d["a"] + 1
+            return d["a"] + d["b"] + y
+
+        @torch.compile(backend="eager")
+        def fn(d):
+            y = d["a"] + 1
+            torch._dynamo.graph_break()
+            return d["a"] + d["b"] + y
+
+        raw = {"a": torch.ones(4), "b": torch.full((4,), 2.0)}
+        m = _mk(Movable, {"a": torch.ones(4), "b": torch.full((4,), 2.0)})
+        result = fn(m)
+        self.assertEqual(result, eager(raw))
+        self.assertIsNone(m._value)
+
+    @parametrize("container", ["dict", "list"])
+    def test_movable_container_returned_across_graph_break(self, container):
+        # The container itself is returned after the break; it must come back as a
+        # plain dict/list of raw Tensors, never wrapped in a Movable.
+        @torch.compile(backend="eager")
+        def fn(c):
+            if container == "dict":
+                _ = c["a"] + 1
+                torch._dynamo.graph_break()
+                return c
+            _ = c[0] + 1
+            torch._dynamo.graph_break()
+            return c
+
+        t = torch.ones(4)
+        m = _mk(Movable, {"a": t} if container == "dict" else [t])
+        result = fn(m)
+        self.assertNotIsInstance(result, Movable)
+        elems = list(result.values()) if container == "dict" else list(result)
+        for e in elems:
+            self.assertNotIsInstance(e, Movable)
+            self.assertIsInstance(e, torch.Tensor)
+        self.assertEqual(elems[0], t)
         self.assertIsNone(m._value)
 
 
