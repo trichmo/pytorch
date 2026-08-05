@@ -45,6 +45,7 @@ import time
 import traceback
 import types
 import typing
+import unittest
 import unittest.mock as mock
 import weakref
 from dataclasses import dataclass
@@ -2174,6 +2175,10 @@ def _compile(
                     ShortenTraceback,
                     PackageError,
                     ResumePrologueTracingError,
+                    # A unittest.SkipTest surfaced from tracing (e.g. a
+                    # @slowTest/skipIf test body) is a genuine test skip, not
+                    # an internal error; let it propagate to the test runner.
+                    unittest.SkipTest,
                 ),
             ):
                 raise
