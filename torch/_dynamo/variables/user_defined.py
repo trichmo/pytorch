@@ -1258,17 +1258,27 @@ class UserDefinedClassVariable(UserDefinedVariable):
             bound_args = None
             try:
                 bound_args = inspect.signature(deque_signature).bind(*args, **kwargs)
-            except TypeError as e:
-                unimplemented(
-                    gb_type="collections.deque() with bad arguments",
-                    context=f"args={args}, kwargs={kwargs}",
-                    explanation="Detected call to collections.deque() with bad arguments.",
-                    hints=[
-                        "Fix the call to collections.deque().",
-                        *graph_break_hints.USER_ERROR,
-                    ],
-                    from_exc=e,
-                )
+            except TypeError:
+                # A bad deque() call is user error, not a Dynamo limitation:
+                # raise a catchable TypeError (matching CPython's messages) so
+                # traced try/except and assertRaises see it, instead of a
+                # fatal graph break. CPython counts positional and keyword args
+                # together and checks the total first.
+                total = len(args) + len(kwargs)
+                if total > 2:
+                    kind = "arguments" if args else "keyword arguments"
+                    msg = f"deque() takes at most 2 {kind} ({total} given)"
+                else:
+                    bad = next(
+                        (k for k in kwargs if k not in ("iterable", "maxlen")), None
+                    )
+                    if bad is not None:
+                        msg = f"deque() got an unexpected keyword argument '{bad}'"
+                    elif "iterable" in kwargs and args:
+                        msg = "argument for deque() given by name ('iterable') and position (1)"
+                    else:
+                        msg = "deque() argument error"
+                raise_type_error(tx, msg)
             if bound_args is None:
                 raise AssertionError("bound_args is None after signature binding")
             if "iterable" in bound_args.arguments:
