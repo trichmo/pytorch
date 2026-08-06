@@ -232,6 +232,15 @@ enum class PyTypeSlotBit : int64_t {
   TP_INIT = 11,
 };
 
+// Unlike the slot bit enums above (which number pytorch's own bitmask built
+// by get_pysequence_slots()/etc.), these values are the real bit positions of
+// CPython's tp_flags (Include/object.h), since tp_flags itself is already
+// directly readable from Python as `type.__flags__`.
+enum class PyTypeFlagBit : int64_t {
+  BASETYPE = 10, // Py_TPFLAGS_BASETYPE
+  DISALLOW_INSTANTIATION = 7, // Py_TPFLAGS_DISALLOW_INSTANTIATION
+};
+
 int64_t get_pysequence_slots(PyTypeObject* type) {
   int64_t slots = 0;
   if (PyType_GetSlot(type, Py_sq_length) != nullptr)
@@ -631,6 +640,10 @@ void initDynamoBindings(PyObject* torch) {
       .value("TP_DESCR_SET", PyTypeSlotBit::TP_DESCR_SET)
       .value("TP_STR", PyTypeSlotBit::TP_STR)
       .value("TP_INIT", PyTypeSlotBit::TP_INIT);
+
+  py::enum_<PyTypeFlagBit>(dynamo_module, "PyTypeFlags")
+      .value("BASETYPE", PyTypeFlagBit::BASETYPE)
+      .value("DISALLOW_INSTANTIATION", PyTypeFlagBit::DISALLOW_INSTANTIATION);
 }
 
 } // namespace torch::dynamo

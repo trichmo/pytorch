@@ -42,7 +42,7 @@ from typing_extensions import is_typeddict
 
 import torch._dynamo.config
 import torch.nn
-from torch._C._dynamo import PyNumberSlots
+from torch._C._dynamo import has_slot, PyNumberSlots, PyTypeFlags
 from torch._guards import Source, TracingContext
 from torch.utils._ordered_set import OrderedSet
 from torch.utils._python_dispatch import is_traceable_wrapper_subclass_type
@@ -1183,6 +1183,11 @@ class UserDefinedClassVariable(UserDefinedVariable):
         )
 
         constant_args = check_constant_args(args, kwargs)
+
+        if isinstance(self.value, type) and has_slot(
+            self.value.__flags__, PyTypeFlags.DISALLOW_INSTANTIATION
+        ):
+            raise_type_error(tx, f"cannot create '{self.value.__name__}' instances")
 
         if torch.distributed.is_available() and self.value is torch.distributed.P2POp:
             if not config.enable_p2p_compilation:

@@ -45,6 +45,7 @@ from typing import (
 )
 from typing_extensions import deprecated, NamedTuple, Self, TypeIs
 
+from torch._C._dynamo import has_slot, PyTypeFlags
 from torch.torch_version import TorchVersion as _TorchVersion
 
 
@@ -766,10 +767,6 @@ def is_structseq(obj: object | type) -> bool:
     return is_structseq_class(cls)
 
 
-# Set if the type allows subclassing (see CPython's Include/object.h)
-Py_TPFLAGS_BASETYPE: int = 1 << 10
-
-
 # Reference: https://github.com/metaopt/optree/blob/main/optree/typing.py
 def is_structseq_class(cls: type) -> bool:
     """Return whether the class is a class of PyStructSequence."""
@@ -781,8 +778,8 @@ def is_structseq_class(cls: type) -> bool:
         and isinstance(getattr(cls, "n_fields", None), int)
         and isinstance(getattr(cls, "n_sequence_fields", None), int)
         and isinstance(getattr(cls, "n_unnamed_fields", None), int)
-        # Check the type does not allow subclassing
-        and not bool(cls.__flags__ & Py_TPFLAGS_BASETYPE)  # only works for CPython
+        # Check the type does not allow subclassing (only works for CPython)
+        and not has_slot(cls.__flags__, PyTypeFlags.BASETYPE)
     )
 
 
