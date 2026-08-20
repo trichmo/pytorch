@@ -353,6 +353,16 @@ class ContinueExecutionCache:
         # its result to the stack? If so, and we are not the leaf resume, then we need to pop
         # the result of calling the next resume function.
         pop_nested_resume_result: bool,
+        # Which of `argnames` were actually boxed in a Consumable by the caller
+        # (see OutputGraph/InstructionTranslatorBase's consumable_boxed_names).
+        # Only these get the _unwrap_for_resume prologue treatment below --
+        # unconditionally unwrapping every argname forces realization of
+        # whatever lazy value each one holds (see isinstance(value, Consumable)
+        # in _unwrap_for_resume), which for some value shapes (an
+        # under-construction nn.Module, a set of tensors, ...) legitimately
+        # wants to graph-break on realization. That is fatal here since
+        # resume-prologue tracing must never error.
+        boxed_argnames: frozenset[str],
     ) -> types.CodeType:
         if resume_offset is None:
             raise AssertionError("resume_offset must not be None")
@@ -381,6 +391,7 @@ class ContinueExecutionCache:
                 null_idxes,
                 nested_code_objs,
                 pop_nested_resume_result,
+                boxed_argnames,
             )
 
         is_py311_plus = sys.version_info >= (3, 11)
@@ -451,12 +462,16 @@ class ContinueExecutionCache:
                 ]
             )
 
-            # Unwrap any argnames that OutputGraph boxed in a Consumable for
-            # memory-retention purposes. If Dynamo retraces this frame, the
-            # generic frame-entry unwrap already replaced the symbolic value
-            # before this bytecode is stepped through, so this is a no-op; if
-            # this frame runs uncompiled, this performs the real unwrap.
+            # Unwrap only the argnames OutputGraph actually boxed in a
+            # Consumable for memory-retention purposes -- not every argname
+            # (see boxed_argnames docstring above). If Dynamo retraces this
+            # frame, the generic frame-entry unwrap already replaced the
+            # symbolic value before this bytecode is stepped through, so this
+            # is a no-op; if this frame runs uncompiled, this performs the
+            # real unwrap.
             for argname in argnames:
+                if argname not in boxed_argnames:
+                    continue
                 prefix.extend(
                     bytecode_from_template(
                         _unwrap_resume_arg_template, varname_map={"dummy": argname}

@@ -2798,7 +2798,7 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
         opt_fn = torch.compile(fn, backend=cnts)
         self.assertIsNone(opt_fn(v, v))
         self.assertEqual(out[0], 1200)
-        self.assertEqual(cnts.op_count, 3)
+        self.assertEqual(cnts.op_count, 4)
 
     def test_return_nested_function(self):
         out = None
@@ -5047,7 +5047,7 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
         for _ in range(10):
             self.assertTrue(same(opt_fn(m2, v), correct2))
         self.assertEqual(cnts.frame_count, 1)
-        self.assertEqual(cnts.op_count, 4)
+        self.assertEqual(cnts.op_count, 5)
 
     def test_deepcopy_dict(self):
         MY_DICT = {"a": 1, "b": 2.0, "c": None}
@@ -6457,7 +6457,7 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
         res = opt_fn(x, torch.Generator())
 
         self.assertTrue(same(ref, res))
-        self.assertEqual(cnts.op_count, 1)
+        self.assertEqual(cnts.op_count, 2)
         self.assertEqual(cnts.frame_count, 1)
         self.assertEqual(len(counters["graph_break"]), 1)
 

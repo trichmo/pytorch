@@ -1413,6 +1413,26 @@ def consumable_source_node(source: Source) -> Source:
 
 
 @functools.lru_cache
+def consumable_logical_name(source: Source) -> str:
+    """The name PGO persistence and the dynamic_sources/unbacked_sources
+    whitelist matchers should use for `source`: any ConsumableSource wrapping
+    is transparently elided so a boxed value's persisted/matched identity is
+    the same as it would have been unboxed (see #192868/#185561).
+
+    Guard codegen, guard-manager tree construction/caching, and bytecode
+    reconstruction must keep using `source.name`/`._name_template`/
+    `.reconstruct()` directly -- those need the real, physical accessor
+    (including `._value`) to build correct runtime checks. This helper is
+    only for the cross-process PGO key and user-supplied whitelist strings.
+    """
+    if isinstance(source, ConsumableSource):
+        return consumable_logical_name(source.base)
+    if isinstance(source, ChainedSource):
+        return source._name_template.format(consumable_logical_name(source.base))
+    return source.name
+
+
+@functools.lru_cache
 def is_from_unspecialized_nn_module_source(source: Source) -> bool:
     if isinstance(source, UnspecializedNNModuleSource):
         return True

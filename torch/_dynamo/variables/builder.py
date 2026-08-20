@@ -137,6 +137,7 @@ from ..source import (
     CallMethodItemSource,
     ChainedSource,
     ConstDictKeySource,
+    consumable_logical_name,
     ConvertIntSource,
     CurrentStreamSource,
     DictGetItemSource,
@@ -2802,10 +2803,13 @@ class VariableBuilder:
                         f"{int_spec!r} (expected int, IntVar, or None)"
                     )
 
-            if is_dynamic_source(self.source.name):
-                log.debug(
-                    "%s marked dynamic via dynamic-sources list", self.source.name
-                )
+            # consumable_logical_name, not self.source.name: dynamic_sources/
+            # unbacked_sources are user-supplied against the logical (unboxed)
+            # name, and this key must match what PGO persists -- see
+            # consumable_logical_name's docstring.
+            logical_name = consumable_logical_name(self.source)
+            if is_dynamic_source(logical_name):
+                log.debug("%s marked dynamic via dynamic-sources list", logical_name)
                 return self.wrap_symint(value, dynamism=DimDynamic.DYNAMIC)
 
             if is_dynamic_value(value):
@@ -2816,10 +2820,8 @@ class VariableBuilder:
                 )
                 return self.wrap_symint(value, dynamism=DimDynamic.DYNAMIC)
 
-            if is_unbacked_source(self.source.name):
-                log.debug(
-                    "%s marked unbacked via unbacked-sources list", self.source.name
-                )
+            if is_unbacked_source(logical_name):
+                log.debug("%s marked unbacked via unbacked-sources list", logical_name)
                 return self.wrap_symint(value, dynamism=DimDynamic.UNBACKED)
 
             if not config.specialize_int:
@@ -2845,7 +2847,7 @@ class VariableBuilder:
 
                     process_automatic_dynamic(
                         self.tx,
-                        self.source.name,
+                        logical_name,
                         FrameStateSizeEntry.make_scalar(value),
                         is_unspecialized_nn_module=self.source.guard_source.is_unspecialized_nn_module(),
                     )
@@ -3411,7 +3413,11 @@ class VariableBuilder:
                 self.install_guards(GuardBuilder.CONSTANT_MATCH)
                 return ConstantVariable.create(value=value, source=self.source)
 
-            name = self.source.name
+            # consumable_logical_name, not self.source.name: this feeds both
+            # PGO persistence and dynamic-sources whitelist matching, which
+            # must key on the logical (unboxed) name -- see
+            # consumable_logical_name's docstring.
+            name = consumable_logical_name(self.source)
 
             frame_state_entry = process_automatic_dynamic(
                 self.tx,
@@ -3424,7 +3430,7 @@ class VariableBuilder:
             # know if bare integers are actually going to be sizevars
             # and it is inappropriate to eagerly duck size them with
             # real sizevars
-            normalized_source_name = normalize_source_name(self.source.name)
+            normalized_source_name = normalize_source_name(name)
 
             if dynamism is not None:
                 dynamic_dim = dynamism
@@ -3526,7 +3532,8 @@ class VariableBuilder:
 
         frame_state_entry = process_automatic_dynamic(
             self.tx,
-            self.source.name,
+            # consumable_logical_name, not self.source.name: see wrap_symint.
+            consumable_logical_name(self.source),
             # type: ignore[arg-type]
             FrameStateSizeEntry.make_scalar(value),
             is_unspecialized_nn_module=self.source.guard_source.is_unspecialized_nn_module(),
@@ -4602,6 +4609,13 @@ def _automatic_dynamic(
         )
 
     name = source.name
+    # consumable_logical_name, not `name`: dynamic_sources/unbacked_sources
+    # whitelist matching and PGO persistence must key on the logical (unboxed)
+    # name. `name` itself must stay physical -- it also keys
+    # shape_env.source_name_to_debug_name (below), which is looked up
+    # elsewhere via the real Source.name (symbolic_shapes.py), not this
+    # elided form.
+    logical_name = consumable_logical_name(source)
     prior_policy = tx.output.tracing_context.tensor_to_context.get(e, None)
     shape_env_to_source_to_symbol_cache = (
         prior_policy.shape_env_to_source_to_symbol_cache if prior_policy else {}
@@ -4687,7 +4701,7 @@ def _automatic_dynamic(
     if (
         config._dynamic_shapes_spec is None
         and static_shapes
-        and not is_dynamic_source(name)
+        and not is_dynamic_source(logical_name)
     ):
         return StatefulSymbolicContext(
             dynamic_sizes=[DimDynamic.STATIC] * e.dim(),
@@ -4700,7 +4714,7 @@ def _automatic_dynamic(
         )
 
     # Prep for automatic dynamic
-    frame_state_entry = record_automatic_dynamic(tx, name, e)
+    frame_state_entry = record_automatic_dynamic(tx, logical_name, e)
 
     # TODO: index export_constraints ahead of time so we don't have to
     # do a linear scan every time here
@@ -4770,7 +4784,7 @@ def _automatic_dynamic(
         # Reflect the user directive in the frame_state
         # For dynamic, apply None always
 
-        normalized_source_name = normalize_source_name(source.name)
+        normalized_source_name = normalize_source_name(logical_name)
 
         if marked_dynamic or (
             _is_dim_dynamic_from_source_dynamism(source, normalized_source_name, i)
@@ -4797,8 +4811,10 @@ def _automatic_dynamic(
             config.automatic_dynamic_shapes and frame_state_entry.is_stride_dynamic(i)
         )
 
-        if is_dynamic_source(name, i):
-            log.debug("%s dim %d marked dynamic via dynamic-sources list", name, i)
+        if is_dynamic_source(logical_name, i):
+            log.debug(
+                "%s dim %d marked dynamic via dynamic-sources list", logical_name, i
+            )
             automatic_dynamic_size = True
 
         if is_dynamic_value(e.size(i)):
@@ -4810,8 +4826,10 @@ def _automatic_dynamic(
             )
             automatic_dynamic_size = True
 
-        if is_unbacked_source(name, i):
-            log.debug("%s dim %d marked unbacked via unbacked-sources list", name, i)
+        if is_unbacked_source(logical_name, i):
+            log.debug(
+                "%s dim %d marked unbacked via unbacked-sources list", logical_name, i
+            )
             automatic_dynamic_size = True
 
         automatic_dynamic = automatic_dynamic_size or automatic_dynamic_stride
@@ -4864,7 +4882,7 @@ def _automatic_dynamic(
         constraint_sizes.append(constraint_size)
         constraint_strides.append(constraint_stride)
 
-        if marked_unbacked or is_unbacked_source(name, i):
+        if marked_unbacked or is_unbacked_source(logical_name, i):
             dynamic_size = DimDynamic.UNBACKED
         elif (
             constraint_size is not None

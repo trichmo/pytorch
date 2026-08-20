@@ -1127,8 +1127,11 @@ class TestConsumablePgo(TestCase):
         self._assert_no_boxed_slot_names(keys)
 
     def test_consumable_source_is_logical_across_break(self):
-        # A Consumable input crossing a graph break records its logical source
-        # (L['x']._value), never the synthesized boxed-list-index source.
+        # A Consumable input crossing a graph break records its fully logical
+        # source (L['x'], with the box elided by consumable_logical_name), never
+        # the synthesized boxed-list-index source and never a stray ._value
+        # suffix -- both PGO and the user-facing dynamic_sources config key on
+        # the same name the value would have had unboxed.
         @torch.compile(backend="eager")
         def f(x):
             a = x + 1
@@ -1139,7 +1142,7 @@ class TestConsumablePgo(TestCase):
         f(_mk(Consumable, torch.randn(8)))
 
         keys = self._all_dynamic_source_keys()
-        self.assertIn("L['x']._value", keys)
+        self.assertIn("L['x']", keys)
         self._assert_no_boxed_slot_names(keys)
 
     def test_consumable_whitelist_reused_no_recompile(self):
@@ -1164,7 +1167,7 @@ class TestConsumablePgo(TestCase):
         match = re.search(r'TORCH_COMPILE_DYNAMIC_SOURCES="(.*)"', state)
         self.assertIsNotNone(match)
         whitelist = match.group(1)
-        self.assertIn("L['x']._value", whitelist)
+        self.assertIn("L['x']", whitelist)
 
         torch._dynamo.reset()
         cnt.clear()

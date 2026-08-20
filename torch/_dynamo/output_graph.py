@@ -521,6 +521,14 @@ class StackLocalsMetadata:
     locals_ctx_args: list[tuple[str, tuple[object, ...]]] = dc_field(
         default_factory=list
     )
+    # Names of root-frame unmodified locals already boxed into a Consumable
+    # by the "root frame's unmodified locals" codegen below. When the root
+    # frame is also the leaf frame (e.g. the unsupported instruction is a
+    # CALL in the root frame itself, so there's no separate blocked inlined
+    # frame), create_resume's is_leaf per-local forwarding loop iterates the
+    # same locals_names and must not re-box these -- doing so would wrap the
+    # already-boxed Consumable in a second one.
+    consumable_boxed_names: set[str] = dc_field(default_factory=set)
 
 
 # TODO we should expand this to make it work for atribtrary in/out
@@ -2424,7 +2432,22 @@ class OutputGraph(OutputGraphCommon):
                 unmodified_locals_names: dict[str, int] = {}
                 for k, v in self.root_tx.symbolic_locals.items():
                     if isinstance(v.source, LocalSource) and v.source.local_name == k:
-                        if isinstance(v, TensorVariable):
+                        # v.is_tensor() would force realization of an unrealized
+                        # LazyVariableTracker (base VariableTracker.is_tensor()
+                        # unconditionally returns False), silently skipping both
+                        # boxing AND the create_delete(k) below for any tensor
+                        # local unused before the break -- exactly the case this
+                        # feature exists to help. Peek the underlying type instead
+                        # so realization (and premature guards) stay deferred to
+                        # wherever the value is genuinely used, mirroring the
+                        # existing peek_type pattern in symbolic_convert.py's
+                        # INLINING GraphModule-detection.
+                        if isinstance(v, variables.LazyVariableTracker) and not v.is_realized():
+                            is_tensor = issubclass(v.peek_type(), torch.Tensor)
+                        else:
+                            is_tensor = v.is_tensor()
+                        if is_tensor:
+                            meta.consumable_boxed_names.add(k)
                             # Box so the resume function's own retrace still sees
                             # a canonical LocalSource(k)._value (never a boxed-slot
                             # index -- see #192868/#185561), while letting us drop

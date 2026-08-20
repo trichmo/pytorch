@@ -3535,6 +3535,11 @@ class InstructionTranslatorBase(
 
         resume_name = unique_id(f"__resume_at_{resume_inst.offset}")
 
+        # Argnames whose value is boxed in a Consumable -- passed to
+        # resume_execution.py so its prologue only unwraps these, not every
+        # argname (see ContinueExecutionCache.generate's boxed_argnames).
+        boxed_argnames: set[str] = set()
+
         # More locals may have been pruned in the current/leaf frame
         # after the unsupported instruction (e.g. branch).
         # There should not be any pruning in the other frames since
@@ -3584,7 +3589,20 @@ class InstructionTranslatorBase(
                         cg.create_binary_subscr(),
                     ],
                 )
-                if isinstance(self.symbolic_locals.get(locals_key), TensorVariable):
+                local_var = self.symbolic_locals.get(locals_key)
+                # Peek the underlying type instead of calling local_var.is_tensor()
+                # directly: an unrealized LazyVariableTracker's is_tensor() falls
+                # through to the base VariableTracker.is_tensor() (always False)
+                # rather than realizing, so a genuinely-tensor-typed but not-yet-
+                # realized local would silently skip boxing here. Peeking avoids
+                # that wrong answer without forcing realization (and the guards
+                # that would install), mirroring symbolic_convert.py's existing
+                # INLINING GraphModule-detection peek_type usage.
+                if isinstance(local_var, LazyVariableTracker) and not local_var.is_realized():
+                    is_tensor = issubclass(local_var.peek_type(), torch.Tensor)
+                else:
+                    is_tensor = local_var.is_tensor()
+                if locals_key not in meta.consumable_boxed_names and is_tensor:
                     # Box so the resume function's own retrace still sees a
                     # canonical value, while letting the current (blocked,
                     # non-tail-call) frame drop its reference to this value
@@ -3604,6 +3622,9 @@ class InstructionTranslatorBase(
                     cg.append_output(cg.create_load(tempvar))
                     cg.call_function(1, False)
                     cg.append_output(cg.create_delete(tempvar))
+                    boxed_argnames.add(arg)
+                elif locals_key in meta.consumable_boxed_names:
+                    boxed_argnames.add(arg)
                 cg.extend_output(create_swap(2))
             # current stack state: frames, frames[i], *(frame i live locals), frames[i]
             cg.extend_output(
@@ -3620,6 +3641,9 @@ class InstructionTranslatorBase(
         else:
             argnames = tuple(meta.locals_names.keys())
             argnames_null = tuple(meta.locals_null_keys)
+            boxed_argnames.update(
+                a for a in argnames if a in meta.consumable_boxed_names
+            )
 
         if sys.version_info < (3, 12):
             if len(argnames_null) != 0:
@@ -3650,6 +3674,7 @@ class InstructionTranslatorBase(
             tuple(meta.stack_null_idxes),
             tuple(resume_codes),
             not self.current_instruction_push,
+            frozenset(boxed_argnames),
         )
 
         # Add original GraphModule context to the resume function to handle
