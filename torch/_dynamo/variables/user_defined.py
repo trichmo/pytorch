@@ -22,6 +22,7 @@ maintaining proper semantics while enabling optimizations where possible.
 """
 
 import _collections  # type: ignore[import-not-found]
+import _thread
 import builtins
 import collections
 import contextlib
@@ -428,6 +429,12 @@ class UserDefinedClassVariable(UserDefinedVariable):
             float.__new__,
             str.__new__,
             collections.deque.__new__,
+            # _thread.RLock / _thread.LockType (threading.RLock / threading.Lock)
+            # reject object.__new__ ("not safe"), but their own tp_new allocates
+            # a fresh, unlocked primitive. Tracing the pure-Python functools
+            # lru_cache wrapper constructs one of these.
+            _thread.RLock.__new__,
+            _thread.LockType.__new__,
         }
         return c_new_fns.union(exceptions)
 
