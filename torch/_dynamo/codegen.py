@@ -898,27 +898,16 @@ class PyCodegen:
                 del self.tempvars[box_node]
 
         if use_boxed_consumable:
-            # The grouped consumable list is on the stack, followed by the other
-            # args. The reconstructed moved tensors now live only in that list,
-            # so once the compiled fn clears it they are freed during graph
-            # execution. Any CSE tempvars were deleted above.
+            # The grouped consumable list is on the stack, followed by the
+            # other args. The reconstructed moved tensors now live only in
+            # that list, so once the compiled fn clears it (see
+            # _NestedBoxedCodeGen/_boxed_consumable_backend_gm) they are freed
+            # during graph execution. Any CSE tempvars were deleted above.
             call_varnames = [f"[{', '.join(consumable_varnames)}]", *other_varnames]
-            if self.tx.output.compiled_fn_boxed:
-                # Eager: the _BoxedCodeGen forward takes one list of all inputs.
-                self.extend_output(
-                    [create_instruction("BUILD_LIST", arg=len(call_varnames))]
-                )
-                self.extend_output(create_call_function(1, False))
-                self.add_pycode(
-                    f"__graph_out = {fn_name}([{', '.join(call_varnames)}])",
-                )
-            else:
-                # AOT/Inductor: flatten_graph_inputs' wrapper takes positional
-                # args; the consumable list is the first steal_arg argument.
-                self.extend_output(create_call_function(len(call_varnames), False))
-                self.add_pycode(
-                    f"__graph_out = {fn_name}({', '.join(call_varnames)})",
-                )
+            self.extend_output(create_call_function(len(call_varnames), False))
+            self.add_pycode(
+                f"__graph_out = {fn_name}({', '.join(call_varnames)})",
+            )
         else:
             self.extend_output(create_call_function(len(graphargs), False))
             self.add_pycode(

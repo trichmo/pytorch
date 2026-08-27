@@ -1168,6 +1168,51 @@ class _BoxedCodeGen(CodeGen):
         return fn_def
 
 
+class _NestedBoxedCodeGen(CodeGen):
+    """
+    CodeGen subclass for a graph where a SUBSET of placeholders should be
+    extracted from one boxed list argument (cleared immediately after
+    extraction, for early deallocation) while every other placeholder stays
+    an ordinary positional argument.
+
+    Unlike _BoxedCodeGen, which boxes every placeholder into one list, this
+    supports a mixed signature -- e.g.
+    ``def forward(self, boxed, other): a = boxed[0]; b = boxed[1]; boxed.clear(); ...``
+    -- without needing a second graph rewrite to represent the sub-list
+    unpacking as real nodes: the unpacking is generated as plain prologue
+    text, exactly like _BoxedCodeGen's own `next(args_iter)` binding, so it
+    costs nothing in node/op count.
+    """
+
+    def __init__(self, boxed_names: list[str], boxed_arg_name: str = "boxed") -> None:
+        super().__init__()
+        self.boxed_names = boxed_names
+        self.boxed_arg_name = boxed_arg_name
+
+    def gen_fn_def(
+        self,
+        free_vars: list[str],
+        maybe_return_annotation: str,
+        *,
+        expanded_def: bool = False,
+    ) -> str:
+        boxed_set = set(self.boxed_names)
+        other_vars = [
+            v
+            for v in free_vars
+            if v.split(":")[0].split("=")[0].strip() not in boxed_set and v != "self"
+        ]
+
+        fn_def = (
+            f"def {self._func_name}(self, {self.boxed_arg_name}"
+            f"{''.join(f', {v}' for v in other_vars)}){maybe_return_annotation}:"
+        )
+        for idx, name in enumerate(self.boxed_names):
+            fn_def += f"\n    {name} = {self.boxed_arg_name}[{idx}]"
+        fn_def += f"\n    {self.boxed_arg_name}.clear()"
+        return fn_def
+
+
 class _PyTreeCodeGen(CodeGen):
     def __init__(self, pytree_info: _PyTreeInfo) -> None:
         super().__init__()

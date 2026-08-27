@@ -54,7 +54,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         ref = opt_fn(x)
         self.assertEqual(ref, res)
         self.assertEqual(cnts.frame_count, 2)
-        self.assertEqual(cnts.op_count, 7)
+        self.assertEqual(cnts.op_count, 6)
 
     def test_single_graph_break_repeat(self):
         global f1, f2, f3
@@ -79,7 +79,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         ref = opt_fn(x)
         self.assertEqual(ref, res)
         self.assertEqual(cnts.frame_count, 3)
-        self.assertEqual(cnts.op_count, 12)
+        self.assertEqual(cnts.op_count, 10)
 
     def test_doubly_nested_graph_break(self):
         global f1, f2, f3
@@ -104,7 +104,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         ref = opt_fn(x)
         self.assertEqual(ref, res)
         self.assertEqual(cnts.frame_count, 3)
-        self.assertEqual(cnts.op_count, 9)
+        self.assertEqual(cnts.op_count, 7)
 
     def test_differing_arg_nums(self):
         global f1, f2, f3, f4
@@ -130,7 +130,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         ref = opt_fn(x)
         self.assertEqual(ref, res)
         self.assertEqual(cnts.frame_count, 2)
-        self.assertEqual(cnts.op_count, 11)
+        self.assertEqual(cnts.op_count, 10)
 
     def test_differing_locals_nums(self):
         global f1, f2, f3
@@ -159,7 +159,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         ref = opt_fn(x)
         self.assertEqual(ref, res)
         self.assertEqual(cnts.frame_count, 2)
-        self.assertEqual(cnts.op_count, 15)
+        self.assertEqual(cnts.op_count, 14)
 
     def test_counters(self):
         global f1, f2, f3, f4
@@ -227,7 +227,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         self.assertEqual(ref, res)
         self.assertEqual(cnts.frame_count, 4)
         # includes set_grad_enabled ops
-        self.assertEqual(cnts.op_count, 17)
+        self.assertEqual(cnts.op_count, 14)
 
     def test_inactive_ctx_manager(self):
         global check, f1, f2, f3
@@ -275,7 +275,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         ref = opt_fn(x)
         self.assertEqual(ref, res)
         self.assertEqual(cnts.frame_count, 3)
-        self.assertEqual(cnts.op_count, 9)
+        self.assertEqual(cnts.op_count, 7)
 
     def test_ctx_manager_nested_step_graph_break(self):
         global f1, f2
@@ -404,7 +404,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         ref = opt_fn(x)
         self.assertEqual(ref, res)
         self.assertEqual(cnts.frame_count, 2)
-        self.assertEqual(cnts.op_count, 14)
+        self.assertEqual(cnts.op_count, 13)
 
     def test_dead_nested_cells(self):
         global f1, f2, f3
@@ -439,7 +439,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         # So when we try to codegen cells for resume functions, we end up trying to codegen
         # a CellVariable without a source, which leads to a graph break we can't resume from.
         self.assertEqual(cnts.frame_count, 2)
-        self.assertEqual(cnts.op_count, 7)
+        self.assertEqual(cnts.op_count, 6)
 
     def test_cells_double_graph_break(self):
         def f1(x1):
@@ -463,9 +463,8 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         res = outer(x)
         ref = opt_fn(x)
         self.assertEqual(ref, res)
-        #TODO: Why extra frame?!
-        self.assertEqual(cnts.frame_count, 3)
-        self.assertEqual(cnts.op_count, 6)
+        self.assertEqual(cnts.frame_count, 2)
+        self.assertEqual(cnts.op_count, 4)
 
     def test_side_effects_cells(self):
         cell1, cell2, cell3, cell4 = (torch.zeros(3),) * 4
@@ -568,7 +567,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
 
         self.assertEqual(ref, res)
         self.assertEqual(cnts.frame_count, 2)
-        self.assertEqual(cnts.op_count, 8)
+        self.assertEqual(cnts.op_count, 7)
 
     def test_nested_graph_break_in_loop(self):
         global f1, f2, f3, f4, f5
@@ -609,8 +608,8 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         # skip frame due to nested graph break in for loop
         # 2 frames from f5+f4, 2 frames from f2+f1 (i == 5), 1 frame from f2+f1 (i != 5)
         self.assertEqual(cnts.frame_count, 5)
-        # 4 additions from f5+f4, 2 x 4 additions from f2+f1 (i == 5, i != 5) + x & i boxed across gb TODO: Why is i passed across?
-        self.assertEqual(cnts.op_count, 14)
+        # 4 additions from f5+f4, 2 x 4 additions from f2+f1 (i == 5, i != 5)
+        self.assertEqual(cnts.op_count, 12)
         self.assertEqual(torch._dynamo.utils.counters["frames"]["total"], 6)
 
     def test_nested_graph_break_in_try_block(self):
@@ -656,8 +655,8 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         # skip frame due to graph break in try block
         # 2 frames from f5+f4+(first part of f3), 2 frames from f2+f1
         self.assertEqual(cnts.frame_count, 4)
-        # 5 additions from f5+f4+(first part of f3), 4 additions from f2+f1 + x unbox across gb
-        self.assertEqual(cnts.op_count, 10)
+        # 5 additions from f5+f4+(first part of f3), 4 additions from f2+f1
+        self.assertEqual(cnts.op_count, 9)
         self.assertEqual(torch._dynamo.utils.counters["frames"]["total"], 4)
 
     def test_nested_step_unsupported(self):
@@ -920,7 +919,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         self.assertEqual(ref, res)
         # 2 frames from each of f5+f4, f3, f2, f1
         self.assertEqual(cnts.frame_count, 8)
-        self.assertEqual(cnts.op_count, 11)
+        self.assertEqual(cnts.op_count, 10)
 
     def test_disable_nested_graph_breaks_context_manager(self):
         """disable_nested_graph_breaks as a context manager."""
@@ -989,7 +988,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         self.assertEqual(ref, x + 4)
         self.assertEqual(foo.attr, x + 3)
         self.assertEqual(cnts.frame_count, 2)
-        self.assertEqual(cnts.op_count, 5)
+        self.assertEqual(cnts.op_count, 3)
 
     def test_nested_store_subscr_graph_break(self):
         class Foo:
@@ -1012,7 +1011,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         self.assertEqual(ref, x + 4)
         self.assertEqual(foo.attr, x + 3)
         self.assertEqual(cnts.frame_count, 2)
-        self.assertEqual(cnts.op_count, 5)
+        self.assertEqual(cnts.op_count, 3)
 
     def test_functorch_with_nested_graph_break(self):
         def f1(x):
@@ -1400,7 +1399,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         result = f(x)
         self.assertEqual(result.shape, torch.Size([10]))
         self.assertEqual(cnts.frame_count, 1)
-        self.assertEqual(cnts.op_count, 2)
+        self.assertEqual(cnts.op_count, 1)
 
     def test_graph_break_during_user_class_init(self):
         """Graph break during user class __init__ via instantiate_user_defined_class_object.
@@ -1427,7 +1426,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         result = f(x)
         self.assertEqual(result, x * 2)
         self.assertEqual(cnts.frame_count, 1)
-        self.assertEqual(cnts.op_count, 2)
+        self.assertEqual(cnts.op_count, 1)
 
     def test_graph_break_during_user_class_new(self):
         """Graph break during __new__ via instantiate_user_defined_class_object.
@@ -1456,7 +1455,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         result = f(x)
         self.assertEqual(result, x + 3)
         self.assertEqual(cnts.frame_count, 1)
-        self.assertEqual(cnts.op_count, 2)
+        self.assertEqual(cnts.op_count, 1)
 
     def test_graph_break_in_copy_deepcopy(self):
         """copy.deepcopy is a BUILTIN_INLINE_WHEN_CALLED function that contains
@@ -1478,9 +1477,8 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         x = torch.randn(10)
         result = f(x)
         self.assertEqual(result.shape, torch.Size([10]))
-        #TODO: Why frame count increase?!
-        self.assertEqual(cnts.frame_count, 3)
-        self.assertEqual(cnts.op_count, 4)
+        self.assertEqual(cnts.frame_count, 2)
+        self.assertEqual(cnts.op_count, 2)
 
     def test_inlined_function_globals_across_graph_break(self):
         """Module-level globals in inlined functions survive graph breaks.
@@ -1538,7 +1536,7 @@ class NestedGraphBreakTests(torch._dynamo.test_case.TestCase):
         # manager is entered, so the pre-break graph is empty (not compiled).
         # Only the resume (enter + `x + 1` + exit) is compiled: 1 frame, 1 op.
         self.assertEqual(cnts.frame_count, 1)
-        self.assertEqual(cnts.op_count, 2)
+        self.assertEqual(cnts.op_count, 1)
 
     def test_ctx_manager_passed_as_sourced_arg(self):
         # A ctx manager passed in as an argument is sourced, so it is wrapped
